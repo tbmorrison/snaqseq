@@ -231,28 +231,31 @@ temp3=merge(temp2,temp1n,
             by.x=c("conIS","posIS","REF","ALT"),
             by.y=c("CHROM","POS","REF","ALT"),
             all.x = T)
-#fold in non-existant NT REF= IS REF with simple position, reset missing to temp stage
-temp4=temp3[is.na(temp3$DP.y),c("CHROM","POS","fn","index","REF","ALT","FILTER","DP.x","AD.x","conIS","posIS")]
-if(nrow(temp4)>0){
-  colnames(temp4)=c("CHROM","POS","fn","index","REF","ALT","FILTER","DP","AD.x","conIS","posIS")
-  temp5=aggregate(DP~CHROM+POS,data=temp1,median) #grab just depth for all IS sequences
-  temp5$DP=as.integer(temp5$DP)
-  temp6=merge(temp4,temp5, 
-              by.x=c("conIS","posIS"),
-              by.y=c("CHROM","POS"),
-              all.x = T)
-  temp6$AD.y=as.integer(0)
-  ntCalls=rbind(temp3[!is.na(temp3$DP.y),],temp6)
-} else {
-  ntCalls=temp3[!is.na(temp3$DP.y),]
-}
+ntCalls=temp3
+##not certain this code is needed, it's required when variant caller not reporting all positions (a bug).
+###fold in non-existant NT REF= IS REF with simple position, reset missing to temp stage
+#temp4=temp3[is.na(temp3$DP.y),c("CHROM","POS","fn","index","REF","ALT","FILTER","DP.x","AD.x","conIS","posIS")]
+#if(nrow(temp4)>0){
+#  colnames(temp4)=c("CHROM","POS","fn","index","REF","ALT","FILTER","DP","AD.x","conIS","posIS")
+#  temp5=aggregate(DP~CHROM+POS,data=temp1,median) #grab just depth for all IS sequences
+#  temp5$DP=as.integer(temp5$DP)
+#  temp6=merge(temp4,temp5, 
+#              by.x=c("conIS","posIS"),
+#              by.y=c("CHROM","POS"),
+#              all.x = T)
+#  temp6$AD.y=as.integer(0)
+#  ntCalls=rbind(temp3[!is.na(temp3$DP.y),],temp6)
+#} else {
+#  ntCalls=temp3[!is.na(temp3$DP.y),]
+#}
 
 ##IF bed filters wrong, you can end up with NA in DP.y
 temp=ntCalls[is.na(ntCalls$DP.y),]
 if (nrow(temp)>0){
-  message(paste0(temp$fn, " missing IS coverge for:",temp$CHROM,":",temp$posIS,".  "))
-  message("Variants are being removed")
-  ntCalls=ntCalls[!is.na(ntCalls$DP.y),]
+ for (i in 1:nrow(temp)){ 
+	message(paste0(temp$fn[i], " missing IS coverge for:",temp$CHROM[i],":",temp$pos[i],".  "))
+  	ntCalls=ntCalls[!is.na(ntCalls$DP.y),]
+  }
 }
 
 ntCalls$AD.y[is.na(ntCalls$AD.y)]=0
@@ -391,7 +394,7 @@ boxplot(log10(ntCalls$DP.y/ntCalls$DP.x),ylim=c(0,log10(max(ntCalls$DP.y/ntCalls
         main=paste0(flipped, " Raw logIS:NT ratios, ",length(unique(ntCalls$fn))," pooled IS"),
         ylab="log IS/NT")
 abline(h=log10(ratio),lty=2)
-def.off()
+dev.off()
 
 ###write NT results to file VCF, removing non 'pass' alts (i.e., not a gVCF anymore)
 ntCalls=ntCalls[order(ntCalls$index),]
