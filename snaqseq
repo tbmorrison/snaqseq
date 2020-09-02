@@ -26,7 +26,7 @@ args = commandArgs(trailingOnly=F)
 #q: use "1 to 1" position mapping file to build base changes
 #q1:make command line compatible, improve plot, improve coverage report.
 #q2:Fixed flipped analysis error, added SNP only flag
-
+#q3:port to ubuntu
 
 list.of.packages <- c("vcfR", "exactci", "tools","gnlm","MASS")
 new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
@@ -169,10 +169,9 @@ extract.gts = function(val,vcf){
 ##Function reads the VCF associated with the filter input (e.g., -NT), returns PASS NT .x and comparable IS
 ReadVCFPair = function(fx,df,vf,flatten){
 files<-list.files(pattern = glob2rx(fx))
-print(files)  
 first=TRUE
 for (i in files){
-  print(i)
+  message(i)
   vcfDataNT=read.vcfR(i,verbose = FALSE,limit = 1e8,checkFile = TRUE,check_keys = TRUE)
   
   ##
@@ -213,12 +212,13 @@ SNAQ= function (ratio,ntRefs,calls,NTISPos,flipped,snpOnly){
 #to do: add back if base change is complement to IS, plot outputs (console or file or none), function to handle platform specific VCF output, improve <5000 hack to identify IS positions.
 #Add background depth and alt count aggregate IS.  NT based on IS, but IS is based on other IS samples.
 
+cat("Building NT:IS tables")
 ntCalls=calls[calls$CHROM %in% ntRefs & calls$FILTER=="PASS",c("fn","index","CHROM","POS","REF","ALT","FILTER","DP","AD")]
 if(snpOnly){ntCalls=ntCalls[nchar(ntCalls$REF)==1 & nchar(ntCalls$ALT)==1,]}
 
 ntCallsIS=merge(ntCalls,NTISPos[,c("CHROM","POS","conIS","posIS")], c("CHROM","POS"),all.x = T)
 
-print(paste0("Missing IS POS for NT alts here --> ",
+message(paste0("Missing IS POS for NT alts here --> ",
              paste(ntCallsIS$CHROM[is.na(ntCallsIS$conIS)],ntCallsIS$POS[is.na(ntCallsIS$conIS)],ntCallsIS$REF[is.na(ntCallsIS$conIS)],ntCallsIS$ALT[is.na(ntCallsIS$conIS)],
                    sep="_")))
 temp1=aggregate(DP~CHROM+POS+REF,data=unique(calls[!(calls$CHROM %in% ntRefs),c("fn","CHROM","POS","REF","DP")]),sum) #grab just depth for each IS sequences, minimize to one chromxposxref
@@ -250,8 +250,8 @@ if(nrow(temp4)>0){
 ##IF bed filters wrong, you can end up with NA in DP.y
 temp=ntCalls[is.na(ntCalls$DP.y),]
 if (nrow(temp)>0){
-  print(paste0("Improper bed filtering, NT & IS missing match for:",temp$CHROM,":",temp$posIS))
-  print("Variants are being removed")
+  message(paste0(temp$fn, " missing IS coverge for:",temp$CHROM,":",temp$posIS,".  "))
+  message("Variants are being removed")
   ntCalls=ntCalls[!is.na(ntCalls$DP.y),]
 }
 
@@ -269,6 +269,7 @@ ntCalls$DP.yc[ntCalls$DP.y<ntCalls$DP.x*6]=ntCalls$DP.y[ntCalls$DP.y<ntCalls$DP.
 # ntCalls$DP.yc=ntCalls$DP.y
 ntCalls=ntCalls[!is.na(ntCalls$DP.y),]
 
+cat("Calculate PET & cutoff...\n")
 ntCalls$PE=mapply(PET,ntCalls$AD.x,ntCalls$AD.yc,
                   ntCalls$DP.x,ntCalls$DP.yc)
 
@@ -278,6 +279,7 @@ ntmed=aggregate(DP.x~fn,data=ntCalls,median)
 samples=sort(unique(ntCalls$fn))
 first=T
 for(i in samples){
+  cat(".")
   temp0=unique(calls[! (calls$CHROM %in% ntRefs) & calls$fn==i & calls$AD>0 & calls$DP>10,])
   tempn0=calls[! (calls$CHROM %in% ntRefs) & !calls$fn==i & calls$DP>10,]
   temp1=aggregate(DP~CHROM+POS+REF,data=unique(tempn0[,c("CHROM","POS","REF","DP")]),sum) #grab just depth for all IS sequences
@@ -347,11 +349,12 @@ for(i in samples){
         isCalls=rbind(isCalls,temp6)
     }
   }else {
-    print(paste0("No variants detected in :",i))
+    message(paste0("No variants detected in :",i))
     ntCalls$PC[ntCalls$fn==i]=0
   }
 }
 
+cat("\nCalculate LOD....\n")
 ##estimate LOD
 ntCalls$lodadx=round(
   ntCalls$DP.x * (ntCalls$AD.yc /ntCalls$DP.yc + 0.25 * qnorm(ntCalls$PC)^2 * (1/ntCalls$DP.x + 1/ntCalls$DP.yc))
@@ -383,7 +386,7 @@ dev.off()
 
 #Plot PE distribution
 #plot NT:IS ratio
-pdf(paste0("IS/NT_coverage_",flipped,"_", format(Sys.time(), "%Y%m%d_%H%M%S"),".pdf"))
+pdf(paste0("IS-NT_coverage_",flipped,"_", format(Sys.time(), "%Y%m%d_%H%M%S"),".pdf"))
 boxplot(log10(ntCalls$DP.y/ntCalls$DP.x),ylim=c(0,log10(max(ntCalls$DP.y/ntCalls$DP.x))),
         main=paste0(flipped, " Raw logIS:NT ratios, ",length(unique(ntCalls$fn))," pooled IS"),
         ylab="log IS/NT")
@@ -394,9 +397,9 @@ def.off()
 ntCalls=ntCalls[order(ntCalls$index),]
 ntCalls$POS=as.character(ntCalls$POS)
 ntCalls$ni=ratio
-print("Writing VCF...")
+message("Writing VCF...")
 for (i in unique(ntCalls$fn)) {
-  print(i)
+  message(i)
   vcfDataNT=read.vcfR(i,verbose = FALSE,limit = 1e8)
   ##Remove non-used ref names
   temp0=vcfDataNT@meta
@@ -476,6 +479,16 @@ write.table(temp7,file=paste0("Ratios_",flipped, format(Sys.time(), "%Y%m%d_%H%M
 ##
 ratio=6 #fold IS over NT for 2 NT alt vs 0 IS alt
 
+if("--help" %in% args){
+message('snaqseq --vc=<string> --flatten=<T or F>  --flipped <string> --IStoNTFile=<path> --wd=<path>')
+message('vc variant caller used to create gVCF <vardict or ampliseq-hd>')
+message('flatten \'T\' if vcf contains multiple alts per row, else \'F\'')
+message('flipped analysis \'NT\', \'IS\', or \'both\' perform snaq-seq analysis on native or snaq control, or both sequences, respectively.')
+message('IStoNTfile path is a tab separated table <NT-chrom><NT-pos><NT-ref><IS-chrom><IS-pos><IS-ref>, lower case gatc indicates base change')
+message('wd is working directory, script processes all *vcf.gz, assumes from same directory.')
+stop()
+}
+
 #Process command line input or ask for input from console
 if("--vc=vardict" %in% args){
   df="DP";vf="VD";fs="*vcf$"
@@ -495,10 +508,11 @@ if("--vc=vardict" %in% args){
 
 if("--flatten=T" %in% args){
   flatten=T
-} else if ("--flatten=T" %in% args){
+} else if ("--flatten=F" %in% args){
   flatten=F
 } else {
-  inpstr<- readline(prompt='flatten (T or F)')
+  cat("flatten (T or F)")
+  inpstr<- readLines("stdin",n=1)
   if (inpstr=="T"){flatten=T}else{flatten=F}
 }
 
@@ -509,7 +523,8 @@ if ("--flipped=NT" %in% args){
 }else if ("--flipped=both" %in% args) {
   flippedAnalysis="both"
 } else {
-  i=readline(prompt='Analysis (NT, IS, both)')
+   cat("Analysis (NT, IS, both)")
+  i<- readLines("stdin",n=1)
   if (i=="NT"){
     flippedAnalysis="NT"
   }else if (i=="IS") {
@@ -519,10 +534,10 @@ if ("--flipped=NT" %in% args){
   } else {stop("incorrect analysis input")}
 }
 
-i=args[grepl("^IStoNTFile=",args)]
+i=args[grepl("^--IStoNTFile=",args)]
 if(length(i)!=0){
-  j=strsplit(i,"=")[2]
-  if (file.exists(j)){
+  j=strsplit(i,"=")[[1]][2]
+ if (file_test("-f",j)){
     #NT to IS lookup Table. ref2 is lowercase for base change positions
     NTISPos=read.table(j,stringsAsFactors = FALSE,header = T,sep="\t")
     colnames(NTISPos)=c("CHROM","POS","REF","conIS","posIS","ref2")
@@ -534,26 +549,30 @@ if(length(i)!=0){
   }
 }else{
   #NT to IS lookup Table
-  NTISPos=read.table(choose.files("Select NT-IS lookup table" ),stringsAsFactors = FALSE,header = T,sep="\t")
-  colnames(NTISPos)=c("CHROM","POS","REF","conIS","posIS","ref2")
-  #Create filter for basechange locations
-  dnbed=unique(NTISPos[NTISPos$ref2 %in% c("g","a","c","t") | NTISPos$REF %in% c("g","a","c","t") ,c("CHROM","POS","REF")])
-    #if (is.na(dnbed)){stop("Requires valid NT to IS lookup table")}
-  #stop("NT to IS lookup table entry required (IStoNTFile=<filepath>)")
+  cat("Path to NT-IS lookup table")
+  NTISPos<- readLines("stdin",n=1)
+  if (file_test("-f",NTISPos)){
+	#NTISPos=read.table(choose.files("Select NT-IS lookup table" ),stringsAsFactors = FALSE,header = T,sep="\t")
+ 	 colnames(NTISPos)=c("CHROM","POS","REF","conIS","posIS","ref2")
+  	#Create filter for basechange locations
+  	dnbed=unique(NTISPos[NTISPos$ref2 %in% c("g","a","c","t") | NTISPos$REF %in% c("g","a","c","t") ,c("CHROM","POS","REF")])
+    	#if (is.na(dnbed)){stop("Requires valid NT to IS lookup table")}
+ } else {stop("NT to IS lookup table entry required (IStoNTFile=<filepath>)")}
 }
 
-i=args[grepl("^wd=",args)]
+i=args[grepl("^--wd=",args)]
 if(length(i)!=0){
-  j=strsplit(i,"=")[2]
-  if (dir.exists(j)){
+  j=strsplit(i,"=")[[1]][2]
+  if (file_test("-d",j)){
     setwd(j)
   } else {
     stop("Must set working directory (wd=<path>)")
   }
 } else { 
   #set working directory (VCF file location)
-  workingDirectory=choose.dir(default="~",caption="Select directory with VCF to process")
-  if (dir.exists(workingDirectory)){
+  cat("path to directory with VCF to process")
+  workingDirectory<- readLines("stdin",n=1)
+  if (file_test("-d", workingDirectory)){
     setwd(workingDirectory)
   } else {
     stop("Working directory (wd=<dir>) not set")

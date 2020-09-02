@@ -1,0 +1,8 @@
+
+
+First time run the commandline:
+sudo Rscript snaqseq --help
+This will install the libraries and exit the script when done.
+
+Required libraries: vcfR, exactci, tools, gnlm, MASS
+
