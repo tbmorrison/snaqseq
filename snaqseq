@@ -254,7 +254,7 @@ temp=ntCalls[is.na(ntCalls$DP.y),]
 if (nrow(temp)>0){
  for (i in 1:nrow(temp)){ 
 	message(paste0(temp$fn[i], " missing IS coverge for:",temp$CHROM[i],":",temp$pos[i],".  "))
-  	ntCalls=ntCalls[!is.na(ntCalls$DP.y),]
+  	ntCalls$DP.y[is.na(ntCalls$DP.y)]=1
   }
 }
 
@@ -267,12 +267,7 @@ ntCalls$DP.yc=as.integer(round(ntCalls$DP.y*ratio*(ntCalls$DP.x/ ntCalls$DP.y),d
 ntCalls$AD.yc[ntCalls$DP.y<ntCalls$DP.x*6]=ntCalls$AD.y[ntCalls$DP.y<ntCalls$DP.x*6]
 ntCalls$DP.yc[ntCalls$DP.y<ntCalls$DP.x*6]=ntCalls$DP.y[ntCalls$DP.y<ntCalls$DP.x*6]
 
-
-# ntCalls$AD.yc=ntCalls$AD.y
-# ntCalls$DP.yc=ntCalls$DP.y
-ntCalls=ntCalls[!is.na(ntCalls$DP.y),]
-
-cat("Calculate PET & cutoff...\n")
+cat("Calculate PET & cutoff")
 ntCalls$PE=mapply(PET,ntCalls$AD.x,ntCalls$AD.yc,
                   ntCalls$DP.x,ntCalls$DP.yc)
 
@@ -366,6 +361,7 @@ temp=ntCalls# temp=merge(ntCalls,dnbed[,c("CHROM","POS","basechange")],by.x=c("C
 # temp$FILTER[!is.na(temp$basechange)]="dnSite"
 temp$FILTER[temp$PE>=temp$PC]="lowPET"
 temp$FILTER[temp$AD.x/temp$DP.x<temp$lodadx/temp$DP.x]="lowPET" #hack to remove strong PET scores occurring in IS.
+temp$FILTER[temp$DP.y==1]="NoIS"
 
 #HACK to detect fishy NT:IS for input sample. PET cutoff sensitive to loading mistakes.
 temp1=aggregate(DP.x~fn,data=isCalls,median)
