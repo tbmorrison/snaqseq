@@ -8,11 +8,11 @@ args = commandArgs(trailingOnly=F)
 ##IStoNTfile path leads to a tab separated table <NT-chrom><NT-pos><NT-ref><IS-chrom><IS-pos><IS-ref>, lower case gatc indicates base change
 ## wd is working directory, script processes all *vcf.gz, assumes from same directory.
 ##SNAQ-SEQ, TF and VarDict compatible
-##Background estimate requires 39 x coverage..i.e., at least 2 samples in the run.
+##Background estimate requires 6 x coverage..i.e., at least 2 samples in the run.
 ##Read VCFs created from a reference genome with controls appended to end.  
 ##TF VSF: Use flow AD and DP for Native,  only PASS NT concidered.
-##For NT alt, match up with IS to acheive 39x depth.
-##For IS alt, match up with all other  IS sample.
+##For NT alt, match up with IS to acheive 6x depth.
+##For IS alt, match up with all other IS sample.
 ##Requires a lookup table that matches NT positions with IS positions, base changes are lower case in IS_REF.
 ##PET cutoff estimated as the 95% of a samples variants when compared to pooled other samples' IS
 #h: use consensus for NT call or IS sample vs depth of all sampples
@@ -26,7 +26,7 @@ args = commandArgs(trailingOnly=F)
 #q: use "1 to 1" position mapping file to build base changes
 #q1:make command line compatible, improve plot, improve coverage report.
 #q2:Fixed flipped analysis error, added SNP only flag
-#q3:port to ubuntu
+#q3:port to ubuntu, NoIS filter error.
 
 list.of.packages <- c("vcfR", "exactci", "tools","gnlm","MASS")
 new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
