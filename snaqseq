@@ -213,6 +213,13 @@ SNAQ= function (ratio,ntRefs,calls,NTISPos,flipped,snpOnly){
 #Add background depth and alt count aggregate IS.  NT based on IS, but IS is based on other IS samples.
 
 cat("Building NT:IS tables")
+#change IS basechange to complement.  Use NTISPos lowercase in REF or ref2 to indicate base change position
+dnbed=unique(NTISPos[NTISPos$ref2 %in% c("g","a","c","t") | NTISPos$REF %in% c("g","a","c","t") ,c("conIS","posIS")])
+dnbed2=paste0(dnbed$conIS,"_",dnbed$posIS)
+calls$lookup=paste0(calls$CHROM,"_",calls$POS)
+calls$REF[calls$lookup %in% dnbed2]=chartr("GATC","CTAG",calls$REF[calls$lookup %in% dnbed2])
+calls$ALT[calls$lookup %in% dnbed2]=chartr("GATC","CTAG",calls$ALT[calls$lookup %in% dnbed2])
+
 ntCalls=calls[calls$CHROM %in% ntRefs & calls$FILTER=="PASS",c("fn","index","CHROM","POS","REF","ALT","FILTER","DP","AD")]
 if(snpOnly){ntCalls=ntCalls[nchar(ntCalls$REF)==1 & nchar(ntCalls$ALT)==1,]}
 
@@ -253,7 +260,7 @@ ntCalls=temp3
 temp=ntCalls[is.na(ntCalls$DP.y),]
 if (nrow(temp)>0){
  for (i in 1:nrow(temp)){ 
-	message(paste0(temp$fn[i], " missing IS coverge for:",temp$CHROM[i],":",temp$pos[i],".  "))
+	message(paste0(temp$fn[i], " missing IS coverge for:",temp$CHROM[i],":",temp$POS[i],"-",temp$REF[i],".  "))
   	ntCalls$DP.y[is.na(ntCalls$DP.y)]=1
   }
 }
@@ -357,13 +364,13 @@ cat("\nCalculate LOD....\n")
 ntCalls$lodadx=round(
   ntCalls$DP.x * (ntCalls$AD.yc /ntCalls$DP.yc + 0.25 * qnorm(ntCalls$PC)^2 * (1/ntCalls$DP.x + 1/ntCalls$DP.yc))
   ,0)
-temp=ntCalls# temp=merge(ntCalls,dnbed[,c("CHROM","POS","basechange")],by.x=c("CHROM","POS"),by.y=c("CHROM","POS"),all.x = T)
+temp=ntCalls
 # temp$FILTER[!is.na(temp$basechange)]="dnSite"
 temp$FILTER[temp$PE>=temp$PC]="lowPET"
 temp$FILTER[temp$AD.x/temp$DP.x<temp$lodadx/temp$DP.x]="lowPET" #hack to remove strong PET scores occurring in IS.
 temp$FILTER[temp$DP.y==1]="NoIS"
-temp$FILTER[temp$DP.x > temp$DP.yc]="lowIS"
-temp$FILTER[(temp$AD.x/temp$DP.x) < (temp$AD.yc/temp$DP.yc)]="ISVar"
+temp$FILTER[temp$DP.x > temp$DP.yc]="lowIS" #The combined run IS should never be below a NT depth.
+temp$FILTER[temp$FILTER=="PASS" & temp$AD.x/temp$DP.x < temp$AD.yc/temp$DP.yc]="ISVar"
 
 #HACK to detect fishy NT:IS for input sample. PET cutoff sensitive to loading mistakes.
 temp1=aggregate(DP.x~fn,data=isCalls,median)
@@ -388,7 +395,7 @@ dev.off()
 #Plot PE distribution
 #plot NT:IS ratio
 pdf(paste0("IS-NT_coverage_",flipped,"_", format(Sys.time(), "%Y%m%d_%H%M%S"),".pdf"))
-boxplot(log10(ntCalls$DP.yc/ntCalls$DP.x),ylim=c(0,log10(max(ntCalls$DP.yc/ntCalls$DP.x))),
+boxplot(log10(ntCalls$DP.y/ntCalls$DP.x),
         main=paste0(flipped, " Raw logIS:NT ratios, ",length(unique(ntCalls$fn))," pooled IS"),
         ylab="log IS/NT")
 abline(h=log10(ratio),lty=2)
@@ -548,8 +555,6 @@ if(length(i)!=0){
     NTISPos=read.table(j,stringsAsFactors = FALSE,header = T,sep="\t")
     colnames(NTISPos)=c("CHROM","POS","REF","conIS","posIS","ref2")
     #Create filter for dinucleotide locations
-    dnbed=unique(NTISPos[NTISPos$ref2 %in% c("g","a","c","t") | NTISPos$REF %in% c("g","a","c","t") ,c("CHROM","POS","REF")])
-    colnames(dnbed)[3]="basechange"
   } else {
     stop("NT to IS lookup table file incorrect")
   }
@@ -561,8 +566,6 @@ if(length(i)!=0){
 	#NTISPos=read.table(choose.files("Select NT-IS lookup table" ),stringsAsFactors = FALSE,header = T,sep="\t")
  	 colnames(NTISPos)=c("CHROM","POS","REF","conIS","posIS","ref2")
   	#Create filter for basechange locations
-  	dnbed=unique(NTISPos[NTISPos$ref2 %in% c("g","a","c","t") | NTISPos$REF %in% c("g","a","c","t") ,c("CHROM","POS","REF")])
-    	#if (is.na(dnbed)){stop("Requires valid NT to IS lookup table")}
  } else {stop("NT to IS lookup table entry required (IStoNTFile=<filepath>)")}
 }
 
@@ -584,7 +587,7 @@ if(length(i)!=0){
     stop("Working directory (wd=<dir>) not set")
   }
 }
-snpOnly=T
+snpOnly=TRUE
 
 #Filter NT calls with SNAQ
 #read all VCF data based on filter provided to ReadVCFPair.
@@ -592,16 +595,12 @@ calls=ReadVCFPair(fs,df,vf,flatten)
 
 if(flippedAnalysis %in% c("NT","both")){
   flipped="";ntRefs=unique(calls$CHROM[calls$CHROM %in% NTISPos$CHROM])  ####this is a hack to detect which ref names belong to control.  #####
-  #dnbed=unique(NTISPos[NTISPos$ref2 %in% c("g","a","c","t") | NTISPos$REF %in% c("g","a","c","t") ,c("CHROM","POS","REF")])
-  #colnames(dnbed)=c("CHROM","POS","basechange")
   SNAQ(ratio,ntRefs,calls,NTISPos,flipped,snpOnly)
 }
 if(flippedAnalysis %in% c("IS","both")){
   flipped="flipped";ntRefs=unique(calls$CHROM[calls$CHROM %in% NTISPos$conIS])
-  #dnbed=unique(NTISPos[NTISPos$ref2 %in% c("g","a","c","t") | NTISPos$REF %in% c("g","a","c","t") ,c("conIS","posIS","ref2")])
   temp=NTISPos[,c("conIS","posIS","ref2","CHROM","POS","REF")]
   colnames(temp)=c("CHROM","POS","REF","conIS","posIS","ref2")
-  #colnames(dnbed)=c("CHROM","POS","basechange")
   SNAQ(ratio,ntRefs,calls,temp,flipped,snpOnly)
 }
 
