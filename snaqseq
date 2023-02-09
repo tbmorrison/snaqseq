@@ -28,6 +28,10 @@ args = commandArgs(trailingOnly=F)
 #q2:Fixed flipped analysis error, added SNP only flag
 #q3:port to ubuntu, NoIS filter error.
 
+#for development
+args <- "--vc=vardict --flipped=both --flatten=F --IStoNTFile=/NGS/code/snaq-split/artic-1595-41/base-map.csv --wd=/NGS/dev"
+
+
 list.of.packages <- c("vcfR", "exactci", "tools","gnlm","MASS")
 new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
 if(length(new.packages)) install.packages(new.packages)
@@ -277,9 +281,7 @@ ntCalls$DP.yc[ntCalls$DP.y<ntCalls$DP.x*6]=ntCalls$DP.y[ntCalls$DP.y<ntCalls$DP.
 cat("Calculate PET & cutoff")
 ntCalls$PE=mapply(PET,ntCalls$AD.x,ntCalls$AD.yc,
                   ntCalls$DP.x,ntCalls$DP.yc)
-
 ntCalls=ntCalls[ntCalls$FILTER=="PASS",]
-
 ntmed=aggregate(DP.x~fn,data=ntCalls,median)
 samples=sort(unique(ntCalls$fn))
 first=T
@@ -458,22 +460,22 @@ for (i in unique(ntCalls$fn)) {
 
 #create median NT/Is table
 #make NT median count, then make IS median count and merge.
-require(dplyr)
-if (is.null(calls$FD)){calls$FD=0}
-calls$ALT[is.na(calls$ALT)]=calls$REF[is.na(calls$ALT)]
-temp1=aggregate(cbind(DP,FD)~sampleID,data=(calls[calls$CHROM %in% ntRefs & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","DP","FD")]),median)
-temp2=unique(calls[calls$CHROM %in% ntRefs & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","CHROM","POS")]) %>% count(sampleID)
-#temp2=aggregate(CHROM~sampleID,data=unique(calls[calls$CHROM %in% ntRefs & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","CHROM","POS")]),length)
-temp3=aggregate(cbind(DP,FD)~sampleID,data=(calls[!(calls$CHROM %in% ntRefs) & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","DP","FD")]),median)
+# require(dplyr)
+# if (is.null(calls$FD)){calls$FD=0}
+# calls$ALT[is.na(calls$ALT)]=calls$REF[is.na(calls$ALT)]
+# temp1=aggregate(cbind(DP,FD)~sampleID,data=(calls[calls$CHROM %in% ntRefs & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","DP","FD")]),median)
+# temp2=unique(calls[calls$CHROM %in% ntRefs & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","CHROM","POS")]) %>% count(sampleID)
+# #temp2=aggregate(CHROM~sampleID,data=unique(calls[calls$CHROM %in% ntRefs & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","CHROM","POS")]),length)
+# temp3=aggregate(cbind(DP,FD)~sampleID,data=(calls[!(calls$CHROM %in% ntRefs) & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","DP","FD")]),median)
 
-temp4=unique(calls[!(calls$CHROM %in% ntRefs) & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","CHROM","POS")]) %>% count(sampleID)
+# temp4=unique(calls[!(calls$CHROM %in% ntRefs) & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","CHROM","POS")]) %>% count(sampleID)
 
-#temp4=aggregate(cbind(CHROM)~sampleID,data=unique(calls[!(calls$CHROM %in% ntRefs) & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","CHROM","POS")]),length)
-temp5=merge(temp1,temp2,by="sampleID",all=T)
-temp6=merge(temp3,temp4,by="sampleID",all=T)
-temp7=merge(temp5,temp6,by="sampleID",all=T)
-colnames(temp7)=c("sampleID","NT_READS","NT_COVERAGE","NT_POSITIONS","IS_READS","IS_COVERAGE","IS_POSITIONS")
-write.table(temp7,file=paste0("Ratios_",flipped, format(Sys.time(), "%Y%m%d_%H%M%S"),".txt"),sep="\t", row.names=FALSE,quote = F)
+# #temp4=aggregate(cbind(CHROM)~sampleID,data=unique(calls[!(calls$CHROM %in% ntRefs) & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","CHROM","POS")]),length)
+# temp5=merge(temp1,temp2,by="sampleID",all=T)
+# temp6=merge(temp3,temp4,by="sampleID",all=T)
+# temp7=merge(temp5,temp6,by="sampleID",all=T)
+# colnames(temp7)=c("sampleID","NT_READS","NT_COVERAGE","NT_POSITIONS","IS_READS","IS_COVERAGE","IS_POSITIONS")
+# write.table(temp7,file=paste0("Ratios_",flipped, format(Sys.time(), "%Y%m%d_%H%M%S"),".txt"),sep="\t", row.names=FALSE,quote = F)
 
 # library(beeswarm)
 # beeswarm(log10(ntCalls$PE),pwcol=1+as.numeric(ntCalls$PE<ntCalls$PC),main=paste0(flipped," XXXXX PET scores"),ylab="log PET")
@@ -503,89 +505,59 @@ stop()
 }
 
 #Process command line input or ask for input from console
-if("--vc=vardict" %in% args){
+if(grepl("--vc=vardict", args)){
   df="DP";vf="VD";fs="*vcf$"
-}else if ("--vc=ampliseq-hd" %in% args){
+}else if (grepl("--vc=ampliseq-hd", args)){
   df="FDP";vf="FAO";fs="*vcf$"
 }else {
-  #console input
-  file.type <- readline(prompt='1) VarDict, 2) Ampliseq-HD :')
-  if (file.type=="1") {
-    df="DP";vf="VD";fs="*vcf$"
-  } else if (file.type=="2") {
-    df="FDP";vf="FAO";fs="*vcf$"
-  } else { 
     stop("No VCF information entered")
-  }
 }
 
-if("--flatten=T" %in% args){
+if(grepl("--flatten=T", args)){
   flatten=T
-} else if ("--flatten=F" %in% args){
+} else if (grepl("--flatten=F", args)){
   flatten=F
 } else {
-  cat("flatten (T or F)")
-  inpstr<- readLines("stdin",n=1)
-  if (inpstr=="T"){flatten=T}else{flatten=F}
+  stop("No flatten T or F entered")
 }
 
-if ("--flipped=NT" %in% args){
+if (grepl("--flipped=NT", args)){
   flippedAnalysis="NT"
-}else if ("--flipped=IS" %in% args) {
+}else if (grepl("--flipped=IS", args)) {
   flippedAnalysis="IS"
-}else if ("--flipped=both" %in% args) {
+}else if (grepl("--flipped=both", args)) {
   flippedAnalysis="both"
 } else {
-   cat("Analysis (NT, IS, both)")
-  i<- readLines("stdin",n=1)
-  if (i=="NT"){
-    flippedAnalysis="NT"
-  }else if (i=="IS") {
-    flippedAnalysis="IS"
-  } else if (i=="both"){
-    flippedAnalysis="both"
-  } else {stop("incorrect analysis input")}
+  stop("incorrect flipped analysis input")
 }
 
-i=args[grepl("^--IStoNTFile=",args)]
-if(length(i)!=0){
-  j=strsplit(i,"=")[[1]][2]
- if (file_test("-f",j)){
+j=sub(" --.*","",sub(".*--IStoNTFile=","",args))
+if(length(j)!=0){
+  if (file_test("-f",j)){
     #NT to IS lookup Table. ref2 is lowercase for base change positions
-    NTISPos=read.table(j,stringsAsFactors = FALSE,header = T,sep="\t")
-    colnames(NTISPos)=c("CHROM","POS","REF","conIS","posIS","ref2")
+    temp <- read.csv(j, stringsAsFactors = FALSE)
+    #headers: REFNAME	ORef	POS	overlap	basechange	cc	REF
+    temp <- unique(temp[! grepl("-SNAQ-CC",temp$ORef), c("ORef", "POS", "REF") ]) #file is NT & IS matched POS after CC removed
+    temp1 <- temp[! grepl("-SNAQ-IS",temp$ORef), ]
+    temp2 <- temp[grepl ("-SNAQ-IS",temp$ORef), ]
+
+
+    NTISPos <- merge(temp1, temp2, by="POS") #ORef.x=NT, ORef.y=IS
+    colnames(NTISPos)=c("POS","CHROM","REF","conIS","ref2")
+    NTISPos$posIS=NTISPos$POS
     #Create filter for dinucleotide locations
   } else {
     stop("NT to IS lookup table file incorrect")
   }
 }else{
-  #NT to IS lookup Table
-  cat("Path to NT-IS lookup table")
-  NTISPos<- readLines("stdin",n=1)
-  if (file_test("-f",NTISPos)){
-	#NTISPos=read.table(choose.files("Select NT-IS lookup table" ),stringsAsFactors = FALSE,header = T,sep="\t")
- 	 colnames(NTISPos)=c("CHROM","POS","REF","conIS","posIS","ref2")
-  	#Create filter for basechange locations
- } else {stop("NT to IS lookup table entry required (IStoNTFile=<filepath>)")}
+  stop("NT to IS lookup table entry required (IStoNTFile=<filepath>)")
 }
 
-i=args[grepl("^--wd=",args)]
-if(length(i)!=0){
-  j=strsplit(i,"=")[[1]][2]
-  if (file_test("-d",j)){
-    setwd(j)
-  } else {
-    stop("Must set working directory (wd=<path>)")
-  }
+j=sub(" --.*","",sub(".*--wd=","",args))
+if(length(j)!=0 && file_test("-d",j)){
+  setwd(j)
 } else { 
-  #set working directory (VCF file location)
-  cat("path to directory with VCF to process")
-  workingDirectory<- readLines("stdin",n=1)
-  if (file_test("-d", workingDirectory)){
-    setwd(workingDirectory)
-  } else {
-    stop("Working directory (wd=<dir>) not set")
-  }
+  stop("Working directory (wd=<dir>) not set")
 }
 snpOnly=TRUE
 

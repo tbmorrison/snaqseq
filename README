@@ -17,3 +17,9 @@ Rscript --vanilla /NGS/snaqseq/snaqseq --vc=vardict --flipped=both --flatten=F -
 ## wd is working directory, script processes all *vcf.gz, assumes from same directory.
 ##SNAQ-SEQ, TF and VarDict compatible
 
+iss01
+Calculate PET & cutoffError in aggregate.data.frame(mf[1L], mf[-1L], FUN = FUN, ...) :
+  no rows to aggregate
+Calls: SNAQ ... aggregate -> aggregate.formula -> aggregate.data.frame
+Execution halted
+
