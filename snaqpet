@@ -1,0 +1,567 @@
+#!/usr/bin/env Rscript
+args = commandArgs(trailingOnly=F)
+
+## snaqseq --vc=<string> --flatten=<T or F>  --flipped <string> --IStoNTFile=<path> --wd=<path>
+## vc variant caller used to create gVCF <vardict or ampliseq-hd>
+## flatten 'T' if vcf contains multiple alts per row, else F
+## flipped analysis 'NT', 'IS', or 'both' perform snaq-seq analysis on native or snaq control, or both sequences, respectively.
+##IStoNTfile path leads to a tab separated table <NT-chrom><NT-pos><NT-ref><IS-chrom><IS-pos><IS-ref>, lower case gatc indicates base change
+## wd is working directory, script processes all *vcf.gz, assumes from same directory.
+##SNAQ-SEQ, TF and VarDict compatible
+##Background estimate requires 6 x coverage..i.e., at least 2 samples in the run.
+##Read VCFs created from a reference genome with controls appended to end.  
+##TF VSF: Use flow AD and DP for Native,  only PASS NT concidered.
+##For NT alt, match up with IS to acheive 6x depth.
+##For IS alt, match up with all other IS sample.
+##Requires a lookup table that matches NT positions with IS positions, base changes are lower case in IS_REF.
+##PET cutoff estimated as the 95% of a samples variants when compared to pooled other samples' IS
+#h: use consensus for NT call or IS sample vs depth of all sampples
+#i: add ability to extract PASS/Nocall from hotspot VCF (i.e., if GT field number >0 indicates alt that PASSes)
+#j: clean vs clean, no mathmatical downsampling.
+#L: use ratio and bonferronic corrected larger_of(0.05 Alpha or PE estimated background)
+#m: generate report of NT/IS ratio.
+#n: not up sampling, any 0/1/2.. GT becomes 0/1, 0/1 when flattening if PASS.
+#o: Passing through INFO, GT, FORMAT, ID, ...to enable removal of 2nd flatten pass in write vcf section.
+#p: adjust for FASTQ>bwa mem>markduplicates>vardict.
+#q: use "1 to 1" position mapping file to build base changes
+#q1:make command line compatible, improve plot, improve coverage report.
+#q2:Fixed flipped analysis error, added SNP only flag
+#q3:port to ubuntu, NoIS filter error.
+
+#for development
+args <- c("--vc=vardict",
+      "--flipped=both",
+      "--flatten=F",
+      "--IStoNTFile=/NGS/code/snaq-split/artic-1595-41/base-map.csv",
+      "--wd=/NGS/dev")
+
+
+# list.of.packages <- c("vcfR", "exactci", "tools","gnlm","MASS")
+# new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+# if(length(new.packages)) install.packages(new.packages)
+library(vcfR)
+library(exactci)
+library(tools)
+library(gnlm)
+library(MASS)
+
+PET=function(a1,a2,d1,d2){
+  return(poisson.exact(c(a1,a2),c(d1,d2),alternative="two.sided")[[3]])
+}
+
+##normalize alts.  input VCF row output flattend alts.
+flattenVCF=function (vcfRow){
+  if(nrow(vcfRow@fix)==0){return(vcfRow)}
+  temp=vcfRow
+  
+  addIt=T
+  for(i in 1:nrow(temp@fix)){
+    temp1=unlist(strsplit(temp@fix[i,"INFO"],";"))
+    aC=lengths(strsplit(temp1[[1]][1],","))
+    if (aC>1){
+      ##INFO
+      first=T
+      for(j in temp1){
+        cc=strsplit(j,",")
+        if(lengths(cc)==aC){
+          hstr=strsplit(j,"=")
+          temp2=paste0(hstr[[1]][1],"=",unlist(strsplit(hstr[[1]][2],",")))
+        } else {
+          temp2=rep(j,aC)
+        }
+        if(first){
+          first=F;temp3=temp2
+        } else {
+          temp3=cbind(temp3,temp2)
+        }
+      }
+      temp4a=apply(temp3,1,paste,collapse=";")
+      
+      
+      ##ALT
+      temp4d=matrix(unlist(strsplit(temp@fix[i,"ALT"],",")),nrow=aC,ncol=1,byrow = T)
+      
+      ##CHROM, POS, ID, REF, QUAL
+      temp4e=matrix(rep(temp@fix[i,"CHROM"],aC),nrow=aC,ncol=1,byrow = T)
+      temp4f=matrix(rep(temp@fix[i,"POS"],aC),nrow=aC,ncol=1,byrow = T)
+      temp4g=matrix(rep(temp@fix[i,"ID"],aC),nrow=aC,ncol=1,byrow = T)
+      temp4h=matrix(rep(temp@fix[i,"REF"],aC),nrow=aC,ncol=1,byrow = T)
+      temp4i=matrix(rep(temp@fix[i,"QUAL"],aC),nrow=aC,ncol=1,byrow = T)
+      
+      
+      ##GT
+      temp1=unlist(strsplit(temp@gt[i,2],":"))
+      first=T
+      for(j in temp1){
+        cc=strsplit(j,",")
+        if(lengths(cc)==aC){
+          temp2=unlist(strsplit(j,","))
+        } else {
+          temp2=rep(j,aC)
+        }
+        if(first){
+          first=F;temp3=temp2
+        } else {
+          temp3=cbind(temp3,temp2)
+        }
+      }
+      temp4b=apply(temp3,1,paste,collapse=":")
+      temp4j=rep(temp@gt[i,1],aC)
+      
+      ##FILTER The GT field numbers indicate PASS, 1/2  is alt 1 and 2 (/ means unphased)
+      tempcm=gsub("\\.","0",temp1[1]) #a ./. led to an warning, tried to fix
+      ii=as.integer(unlist(strsplit(tempcm,"/"))) 
+      temp4c=matrix(rep("NOCALL",aC),nrow=aC,ncol=1,byrow = T)
+      temp4b=gsub("^[\\.0-9]/[\\.0-9]","0/0",temp4b)
+      ii=ii[ii>0]
+      if(length(ii)>0){
+        temp4c[ii,1]=temp@fix[i,"FILTER"]
+        temp4b[ii]=gsub("^[0-9]/[0-9]","0/1",temp4b[ii])
+      }
+      
+    } else {
+      temp4a=temp@fix[i,"INFO"]
+      temp4b=temp@gt[i,2]
+      if(grepl("1",unlist(strsplit(temp@gt[i,2],":"))[1])){temp4c=temp@fix[i,"FILTER"]}else{temp4c="NOCALL"}
+      #temp4c=temp@fix[i,"FILTER"]
+      temp4d=temp@fix[i,"ALT"]
+      temp4e=temp@fix[i,"CHROM"]
+      temp4f=temp@fix[i,"POS"]
+      temp4g=temp@fix[i,"ID"]
+      temp4h=temp@fix[i,"REF"]
+      temp4i=temp@fix[i,"QUAL"]
+      temp4j=temp@gt[i,1]
+      
+    }
+    if(addIt) {
+      addIt=F
+      temp5a=matrix(temp4a,ncol=1,nrow=aC,byrow=T)
+      temp5b=matrix(temp4b,ncol=1,nrow=aC,byrow=T)
+      temp5c=matrix(temp4c,ncol=1,nrow=aC,byrow=T)
+      temp5d=matrix(temp4d,ncol=1,nrow=aC,byrow=T)
+      temp5e=matrix(temp4e,ncol=1,nrow=aC,byrow=T)
+      temp5f=matrix(temp4f,ncol=1,nrow=aC,byrow=T)
+      temp5g=matrix(temp4g,ncol=1,nrow=aC,byrow=T)
+      temp5h=matrix(temp4h,ncol=1,nrow=aC,byrow=T)
+      temp5i=matrix(temp4i,ncol=1,nrow=aC,byrow=T)
+      temp5j=matrix(temp4j,ncol=1,nrow=aC,byrow=T)
+      
+    } else {
+      temp5a=rbind(temp5a,matrix(temp4a,nrow=aC,ncol=1,byrow=T))
+      temp5b=rbind(temp5b,matrix(temp4b,nrow=aC,ncol=1,byrow=T))
+      temp5c=rbind(temp5c,matrix(temp4c,nrow=aC,ncol=1,byrow=T))
+      temp5d=rbind(temp5d,matrix(temp4d,nrow=aC,ncol=1,byrow=T))
+      temp5e=rbind(temp5e,matrix(temp4e,nrow=aC,ncol=1,byrow=T))
+      temp5f=rbind(temp5f,matrix(temp4f,nrow=aC,ncol=1,byrow=T))
+      temp5g=rbind(temp5g,matrix(temp4g,nrow=aC,ncol=1,byrow=T))
+      temp5h=rbind(temp5h,matrix(temp4h,nrow=aC,ncol=1,byrow=T))
+      temp5i=rbind(temp5i,matrix(temp4i,nrow=aC,ncol=1,byrow=T))    
+      temp5j=rbind(temp5j,matrix(temp4j,nrow=aC,ncol=1,byrow=T))
+    }
+  }
+  
+  temp6=cbind(temp5e,temp5f,temp5g,temp5h,temp5d,temp5i,temp5c,temp5a)
+  colnames(temp6)=colnames(temp@fix)
+  temp@fix=temp6
+  temp7=cbind(temp5j,temp5b)
+  colnames(temp7)=colnames(temp@gt)
+  temp@gt=temp7
+  return(temp)
+  }
+
+extract.gts = function(val,vcf){
+  return(sub(";.*$","",sub(paste0("^.*;", val, "="),"",vcf)))
+}
+
+##Function reads the VCF associated with the filter input (e.g., -NT), returns PASS NT .x and comparable IS
+ReadVCFPair=function(fx,df,vf,flatten){
+files<-list.files(pattern = glob2rx(fx))
+first=TRUE
+for (i in files){
+  message(i)
+  vcfDataNT=read.vcfR(i,verbose = FALSE,limit = 1e8,checkFile = TRUE,check_keys = TRUE)
+  
+  ##
+  
+  if (flatten) {vcfDataNT=flattenVCF(vcfDataNT)}
+  
+  #Isolate Native PASSing variant in a dataframe with an index pointing back to original list row.
+    passVariants=data.frame(unlist(vcfDataNT@fix),stringsAsFactors = FALSE)
+    if(nrow(passVariants)>0){
+      passVariants=data.frame(passVariants,
+                              DP=as.integer(extract.gts(df,passVariants$INFO)),
+                              AD=as.character(extract.gts(vf,passVariants$INFO)),
+                              stringsAsFactors = FALSE)
+      passVariants$index=seq(1,nrow(passVariants),1)
+      passVariants$fn=i
+      passVariants$sample=colnames(vcfDataNT@gt)[2]
+      passVariants$POS=as.integer(passVariants$POS)
+      passVariants$sampleID=colnames(vcfDataNT@gt)[2]
+      passVariants=cbind(passVariants,data.frame(unlist(vcfDataNT@gt),stringsAsFactors = FALSE))
+      colnames(passVariants)[16]='gt'
+      if (nrow(passVariants)>0){
+        if (first){first=FALSE;vcf3=passVariants}else{vcf3=rbind(vcf3,passVariants)}
+      }
+    }
+}
+vcf3$AD=as.integer(vcf3$AD)
+return(vcf3[,c("fn","sampleID","index","CHROM","POS","REF","ALT","FILTER","DP","AD","FORMAT","gt","ID","QUAL","INFO")])
+}
+
+SNAQ= function (ratio,ntRefs,calls,NTISPos,flipped,snpOnly){
+#SNAQ analysis flow: match background and alts to every PASS call, normalize IS to 6x NT coverage, estimate cutoff (bonfirroni adjusted alpha 0.05), 
+#  estimate LOD, filter any poor NT:IS as lowIS, write vcf, right coverage table
+#to do: add back if base change is complement to IS, plot outputs (console or file or none), function to handle platform specific VCF output, improve <5000 hack to identify IS positions.
+#Add background depth and alt count aggregate IS.  NT based on IS, but IS is based on other IS samples.
+
+cat("Building NT:IS tables")
+#change IS basechange to complement.  Use NTISPos lowercase in REF or ref2 to indicate base change position
+dnbed=unique(NTISPos[NTISPos$ref2 %in% c("g","a","c","t") | NTISPos$REF %in% c("g","a","c","t") ,c("conIS","posIS")])
+dnbed2=paste0(dnbed$conIS,"_",dnbed$posIS)
+calls$lookup=paste0(calls$CHROM,"_",calls$POS)
+calls$REF[calls$lookup %in% dnbed2]=chartr("GATC","CTAG",calls$REF[calls$lookup %in% dnbed2])
+calls$ALT[calls$lookup %in% dnbed2]=chartr("GATC","CTAG",calls$ALT[calls$lookup %in% dnbed2])
+
+ntCalls=calls[calls$CHROM %in% ntRefs & calls$FILTER=="PASS",c("fn","index","CHROM","POS","REF","ALT","FILTER","DP","AD")]
+if(snpOnly){ntCalls=ntCalls[nchar(ntCalls$REF)==1 & nchar(ntCalls$ALT)==1,]}
+
+ntCallsIS=merge(ntCalls,NTISPos[,c("CHROM","POS","conIS","posIS")], c("CHROM","POS"),all.x = T)
+
+message(paste0("Missing IS POS for NT alts here --> ",
+             paste(ntCallsIS$CHROM[is.na(ntCallsIS$conIS)],ntCallsIS$POS[is.na(ntCallsIS$conIS)],ntCallsIS$REF[is.na(ntCallsIS$conIS)],ntCallsIS$ALT[is.na(ntCallsIS$conIS)],
+                   sep="_")))
+temp1=aggregate(DP~CHROM+POS+REF,data=unique(calls[!(calls$CHROM %in% ntRefs),c("fn","CHROM","POS","REF","DP")]),sum) #grab just depth for each IS sequences, minimize to one chromxposxref
+temp2=merge(ntCallsIS,temp1,
+            by.x=c("conIS","posIS","REF"),
+            by.y=c("CHROM","POS","REF"),
+            all.x = T)
+temp1n=aggregate(AD~CHROM+POS+REF+ALT,data=calls[!(calls$CHROM %in% ntRefs),],sum) #grab just depth for all IS sequences
+temp3=merge(temp2,temp1n,
+            by.x=c("conIS","posIS","REF","ALT"),
+            by.y=c("CHROM","POS","REF","ALT"),
+            all.x = T)
+ntCalls=temp3
+##not certain this code is needed, it's required when variant caller not reporting all positions (a bug).
+###fold in non-existant NT REF= IS REF with simple position, reset missing to temp stage
+#temp4=temp3[is.na(temp3$DP.y),c("CHROM","POS","fn","index","REF","ALT","FILTER","DP.x","AD.x","conIS","posIS")]
+#if(nrow(temp4)>0){
+#  colnames(temp4)=c("CHROM","POS","fn","index","REF","ALT","FILTER","DP","AD.x","conIS","posIS")
+#  temp5=aggregate(DP~CHROM+POS,data=temp1,median) #grab just depth for all IS sequences
+#  temp5$DP=as.integer(temp5$DP)
+#  temp6=merge(temp4,temp5, 
+#              by.x=c("conIS","posIS"),
+#              by.y=c("CHROM","POS"),
+#              all.x = T)
+#  temp6$AD.y=as.integer(0)
+#  ntCalls=rbind(temp3[!is.na(temp3$DP.y),],temp6)
+#} else {
+#  ntCalls=temp3[!is.na(temp3$DP.y),]
+#}
+
+##IF bed filters wrong, you can end up with NA in DP.y
+temp=ntCalls[is.na(ntCalls$DP.y),]
+if (nrow(temp)>0){
+ for (i in 1:nrow(temp)){ 
+	message(paste0(temp$fn[i], " missing IS coverge for:",temp$CHROM[i],":",temp$POS[i],"-",temp$REF[i],".  "))
+  	ntCalls$DP.y[is.na(ntCalls$DP.y)]=1
+  }
+}
+
+ntCalls$AD.y[is.na(ntCalls$AD.y)]=0
+##IF clean v clean, could be issue with ratio adjust because pooled IS could be lower than NT.
+ntCalls$AD.yc=as.integer(round(ntCalls$AD.y*ratio*(ntCalls$DP.x/ ntCalls$DP.y),digits=0))
+ntCalls$DP.yc=as.integer(round(ntCalls$DP.y*ratio*(ntCalls$DP.x/ ntCalls$DP.y),digits=0))
+
+#replace AD.yc and DP.yc with .y if up sampling occurred.
+ntCalls$AD.yc[ntCalls$DP.y<ntCalls$DP.x*6]=ntCalls$AD.y[ntCalls$DP.y<ntCalls$DP.x*6]
+ntCalls$DP.yc[ntCalls$DP.y<ntCalls$DP.x*6]=ntCalls$DP.y[ntCalls$DP.y<ntCalls$DP.x*6]
+
+cat("Calculate PET & cutoff")
+ntCalls$PE=mapply(PET,ntCalls$AD.x,ntCalls$AD.yc,
+                  ntCalls$DP.x,ntCalls$DP.yc)
+ntCalls=ntCalls[ntCalls$FILTER=="PASS",]
+ntmed=aggregate(DP.x~fn,data=ntCalls,median)
+samples=sort(unique(ntCalls$fn))
+first=T
+for(i in samples){
+  cat(".")
+  temp0=unique(calls[! (calls$CHROM %in% ntRefs) & calls$fn==i & calls$AD>0 & calls$DP>10,])
+  tempn0=calls[! (calls$CHROM %in% ntRefs) & !calls$fn==i & calls$DP>10,]
+  temp1=aggregate(DP~CHROM+POS+REF,data=unique(tempn0[,c("CHROM","POS","REF","DP")]),sum) #grab just depth for all IS sequences
+  temp2=merge(temp0,temp1,by=c("CHROM","POS","REF"),all.x = T)
+  temp1n=aggregate(AD~CHROM+POS+REF+ALT,data=tempn0,sum) #grab just depth for all IS sequences
+  temp3=merge(temp2,temp1n,by=c("CHROM","POS","REF","ALT"),all.x = T)
+  #print(paste0("Missing CHROM+POS+REF match",temp3$fn,temp3$CHROM,temp3$POS,temp3$REF,sep=":"))
+  #fold in non-existant IScurrent POSxREF= IS POSxREF with simple position, reset missing to temp stage
+  temp4=temp3[is.na(temp3$DP.y),c("CHROM","POS","fn","index","REF","ALT","FILTER","DP.x","AD.x")]
+  if(nrow(temp4)>0) {
+    colnames(temp4)=c("CHROM","POS","fn","index","REF","ALT","FILTER","DP","AD.x")
+    temp5=aggregate(DP~CHROM+POS,data=temp1,median) #grab just depth for all IS sequences at POS (could be multiple REFs, so combine with median)
+    temp5$DP=as.integer(temp5$DP)
+    temp6=merge(temp4,temp5, by=c("CHROM","POS"),all.x = T)
+    temp6$AD.y=as.integer(0)
+    #print(paste0("Missing CHROM+POS match",temp6$fn[is.na(temp6$DP.y)],temp6$CHROM[is.na(temp6$DP.y)],temp6$POS[is.na(temp6$DP.y)],temp6$REF[is.na(temp6$DP.y)],sep=":"))
+    temp6=rbind(temp3[!is.na(temp3$DP.y),c("CHROM","POS","REF","ALT","fn","index","FILTER","DP.x","AD.x","DP.y","AD.y")],temp6)
+  } else {
+    temp6=temp3[,c("CHROM","POS","REF","ALT","fn","index","FILTER","DP.x","AD.x","DP.y","AD.y")] # in theory, all of these should have DP.y
+  }
+  temp6$AD.y[is.na(temp6$AD.y)]=as.integer(0)
+
+  #normalize the IS dp.x & dp.y to the sample's median NT depth.
+  temp6$DP.yc=as.integer(round(temp6$DP.y*ratio*(temp6$DP.x/ temp6$DP.y),digits=0))
+  temp6$AD.yc=as.integer(round(temp6$AD.y*ratio* temp6$DP.x / temp6$DP.y,digits=0))
+  temp6=temp6[!is.na(temp6$DP.y),]
+  
+  temp6$PE=mapply(PET,temp6$AD.x,temp6$AD.yc,
+                  temp6$DP.x,temp6$DP.yc)
+
+    ####THIS IS WHERE PE CUTOFF IS SET
+  if(length(temp6$PE)>0){
+    p2t=log10(temp6$PE);p2q=quantile(p2t)
+    #remove outliers
+    ### This only works if there is diversity, but if 25% - 75% =zero, this formula doesn't work.
+    ### Here's my hack
+    if (p2q[4]-p2q[2]==0) {
+      p2=p2t
+    } else {
+      p2=p2t[p2t>p2q[3]-1.5*(p2q[4]-p2q[2])] #eliminate outliers for cutoff assessment
+    }
+    if(length(p2)>20){
+      j=quantile(p2,0.05/length(p2t)) ## if enough data points estimate, log normal estimate with 5% alpha
+      ## however if LNorm too tight, don't trust it over Bonferroni correction
+      if(j>log10(0.05/length(p2))) {
+        j=log10(0.05/length(p2))
+      }
+    }else{
+      j=log10(0.05/length(p2t)) ## not enough datapoints, use bonferroni correction
+    } 
+    ntCalls$PC[ntCalls$fn==i]=10^j
+
+    p2[p2 < -10]=-10 #for plotting purposes, focus on noise end
+     #hist((p2),breaks=20,xlim=c(-10,0),freq = F,main=i,col=rgb(1,0,0,0.5),lty="blank",xlab="log Poisson Exact Test",plot=F)
+     #abline(v=(j),lty=2,lwd=2)
+
+    #abline(v=log10(ntCalls$PE[ntCalls$fn==i]),col=rgb(0,0,1,0.5),lwd=1)
+    #hist(log10(ntCalls$PE[ntCalls$fn==i]),breaks=100,add=T,freq=T,xlim=c(-200,0),col=rgb(0,0,1,0.5))
+    #abline(v=log10(quantile(temp6$PE,0.05)),lty=2)
+    #abline(v=log10(0.05/length(ntCalls$PE[ntCalls$fn==i])),col=2)
+    #plot(log10(temp6$AD.yc/temp6$DP.yc),log10(temp6$AD.xc/ temp6$DP.xc),cex=.8,xlim=c(-5,0),ylim=c(-5,0));lines(c(-5,0),c(-5,0),main=i)
+    #plot(log10(temp6$AD.y/temp6$DP.y),log10(temp6$AD.x/ temp6$DP.x),cex=.8,xlim=c(-5,0),ylim=c(-5,0));lines(c(-5,0),c(-5,0),main="raw")
+    
+    if (first){
+      isCalls=temp6;first=F
+    } else {
+        isCalls=rbind(isCalls,temp6)
+    }
+  }else {
+    message(paste0("No variants detected in :",i))
+    ntCalls$PC[ntCalls$fn==i]=0
+  }
+}
+
+cat("\nCalculate LOD....\n")
+##estimate LOD
+ntCalls$lodadx=round(
+  ntCalls$DP.x * (ntCalls$AD.yc /ntCalls$DP.yc + 0.25 * qnorm(ntCalls$PC)^2 * (1/ntCalls$DP.x + 1/ntCalls$DP.yc))
+  ,0)
+temp=ntCalls
+# temp$FILTER[!is.na(temp$basechange)]="dnSite"
+temp$FILTER[temp$PE>=temp$PC]="lowPET"
+temp$FILTER[temp$AD.x/temp$DP.x<temp$lodadx/temp$DP.x]="lowPET" #hack to remove strong PET scores occurring in IS.
+temp$FILTER[temp$DP.y==1]="NoIS"
+temp$FILTER[temp$DP.x > temp$DP.yc]="lowIS" #The combined run IS should never be below a NT depth.
+temp$FILTER[temp$FILTER=="PASS" & temp$AD.x/temp$DP.x < temp$AD.yc/temp$DP.yc]="ISVar"
+
+#HACK to detect fishy NT:IS for input sample. PET cutoff sensitive to loading mistakes.
+temp1=aggregate(DP.x~fn,data=isCalls,median)
+temp2=aggregate(DP.x~fn,data=ntCalls,median)
+temp3=merge(temp2,temp1,by="fn",all.x = T)
+temp3$niratio=temp3$DP.x.x/temp3$DP.x.y
+temp$FILTER[which(temp$fn %in% unique(temp3$fn[which(temp3$niratio>30 | is.na(temp3$niratio))]))]="lowIS"
+ntCalls=temp
+
+#poisson math should work with zero...but plotting doesn't...set lodadx to 1 if zero
+psym=c(".","o","*")
+ntCalls$lodadx[ntCalls$lodadx==0]=1
+pdf(paste0("VCFvsLOB_",flipped,"_", format(Sys.time(), "%Y%m%d_%H%M%S"),".pdf"))
+plot(log10(ntCalls$lodadx/ntCalls$DP.x),log10(ntCalls$AD.x/ntCalls$DP.x),
+     pch=psym[1+as.numeric(ntCalls$FILTER=="PASS")+2*as.numeric(ntCalls$FILTER !="PASS" & ntCalls$FILTER !="lowPET")],
+     cex=0.7 + 0.4*as.numeric(ntCalls$FILTER=="PASS"),
+     xlim=c(-5,0),ylim=c(-5,0),
+     xlab="SNAQ-SEQ LOB", ylab="VAF",main=paste0(flipped," SNAQ-SEQ Analysis"))
+lines(c(-5,0),c(-5,0),lty=2)
+dev.off()
+
+#Plot PE distribution
+#plot NT:IS ratio
+pdf(paste0("IS-NT_coverage_",flipped,"_", format(Sys.time(), "%Y%m%d_%H%M%S"),".pdf"))
+boxplot(log10(ntCalls$DP.y/ntCalls$DP.x),
+        main=paste0(flipped, " Raw logIS:NT ratios, ",length(unique(ntCalls$fn))," pooled IS"),
+        ylab="log IS/NT")
+abline(h=log10(ratio),lty=2)
+dev.off()
+
+###write NT results to file VCF, removing non 'pass' alts (i.e., not a gVCF anymore)
+ntCalls=ntCalls[order(ntCalls$index),]
+ntCalls$POS=as.character(ntCalls$POS)
+ntCalls$ni=ratio
+
+write.table(ntCalls,file=paste0("NTCalls_",flipped, format(Sys.time(), "%Y%m%d_%H%M%S"),".txt"),sep="\t", row.names=FALSE,quote = F)
+
+message("Writing VCF...")
+for (i in unique(ntCalls$fn)) {
+  message(i)
+  vcfDataNT=read.vcfR(i,verbose = FALSE,limit = 1e8)
+  ##Remove non-used ref names
+  temp0=vcfDataNT@meta
+  temp0=sub("##contig=<ID=","",temp0)
+  temp0=sub(",.+","",temp0)
+  temp1=vcfDataNT@meta[temp0 %in% ntRefs]
+  vcfDataNT@meta=append(vcfDataNT@meta[!grepl("^##contig.+",vcfDataNT@meta,perl=T)],temp1)
+  ##merge ntcalls with the original info
+  temp0=merge(ntCalls[ntCalls$fn==i,c("fn","index","FILTER")],calls[,c("fn","index","CHROM","POS","ID","REF","ALT","QUAL","INFO")])
+  temp1=attributes(vcfDataNT@fix)$dimnames
+  vcfDataNT@fix=matrix(as.matrix(temp0[,colnames(vcfDataNT@fix)]),nrow=nrow(temp0),ncol=8,dimnames=temp1)
+  temp0=merge(ntCalls[ntCalls$fn==i,c("fn","index")],calls[,c("fn","index","FORMAT","gt")])
+  temp1=attributes(vcfDataNT@gt)$dimnames
+  colnames(temp0)[4]=temp1[[2]][2]
+  vcfDataNT@gt=matrix(as.matrix(temp0[,colnames(vcfDataNT@gt)]),nrow=nrow(temp0),ncol=2,dimnames=temp1)
+
+  vcfDataNT@fix[,"FILTER"]="NDsnaq"
+  vcfDataNT@gt[,1] = paste0(vcfDataNT@gt[,1],":NI:CD:CA:PE:PC:LD")  
+  vcfDataNT@gt[,2] = paste0(vcfDataNT@gt[,2],":",
+                            ntCalls$ni[which(ntCalls$fn==i)],":",
+                            ntCalls$DP.yc[which(ntCalls$fn==i)],":",
+                            ntCalls$AD.yc[which(ntCalls$fn==i)],":",
+                            signif(log10(ntCalls$PE[which(ntCalls$fn==i)]),3),":",
+                            signif(log10(ntCalls$PC[which(ntCalls$fn==i)]),3),":",
+                            ntCalls$lodadx[which(ntCalls$fn==i)])  
+  vcfDataNT@fix[,"FILTER"] = ntCalls$FILTER[which(ntCalls$fn==i)]
+  vcfDataNT@meta=c(vcfDataNT@meta, 
+                   "##snaqSeqVersion=\"0.2d\"",
+                   "##FORMAT=<ID=NI,Number=1,Type=Integer,Description=\"NT:IS ratio used for SNAQ-SEQ analysis\">",
+                   "##FORMAT=<ID=CD,Number=1,Type=Integer,Description=\"SNAQ-SEQ control depth\">",
+                   "##FORMAT=<ID=CA,Number=1,Type=Integer,Description=\"SNAQ-SEQ control alt count\">",
+                   "##FORMAT=<ID=PE,Number=1,Type=float,Description=\"log10 Poisson Exact Test p-value\">",
+                   "##FORMAT=<ID=PC,Number=2,Type=float,Description=\"Log10 Poisson Exact Test p-value cutoff\">",
+                   "##FORMAT=<ID=LD,Number=2,Type=float,Description=\"Alt LOD count for this position\">",
+                   "##FILTER=<ID=NDsnaq,Description=\"PASS call not reviewed by SNAQ\">",
+                   "##FILTER=<ID=ISRatio,Description=\"More IS variants than NT variants\">",
+                   "##FILTER=<ID=dnSite,Description=\"Variant in control base position\">",
+                   "##FILTER=<ID=lowPET,Description=\"SNAQ Poisson Exact Test below cutoff\">",
+                   "##FILTER=<ID=lowIS,Description=\"Combined run IS < NT at this position\">",
+                   "##FILTER=<ID=ISVar,Description=\"SNAQ IS has higher VAF than native\">")
+ 
+  #  if (grepl('.*gz$',i)) {gzs=".gz"} else {gzs=""}
+  write.vcf(vcfDataNT,file=paste0(colnames(vcfDataNT@gt)[2],"_SNAQ",flipped,".vcf.gz"))
+}
+
+#create median NT/Is table
+#make NT median count, then make IS median count and merge.
+# require(dplyr)
+# if (is.null(calls$FD)){calls$FD=0}
+# calls$ALT[is.na(calls$ALT)]=calls$REF[is.na(calls$ALT)]
+# temp1=aggregate(cbind(DP,FD)~sampleID,data=(calls[calls$CHROM %in% ntRefs & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","DP","FD")]),median)
+# temp2=unique(calls[calls$CHROM %in% ntRefs & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","CHROM","POS")]) %>% count(sampleID)
+# #temp2=aggregate(CHROM~sampleID,data=unique(calls[calls$CHROM %in% ntRefs & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","CHROM","POS")]),length)
+# temp3=aggregate(cbind(DP,FD)~sampleID,data=(calls[!(calls$CHROM %in% ntRefs) & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","DP","FD")]),median)
+
+# temp4=unique(calls[!(calls$CHROM %in% ntRefs) & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","CHROM","POS")]) %>% count(sampleID)
+
+# #temp4=aggregate(cbind(CHROM)~sampleID,data=unique(calls[!(calls$CHROM %in% ntRefs) & calls$DP>0 & nchar(calls$REF==1) & nchar(calls$ALT)==1 ,c("sampleID","CHROM","POS")]),length)
+# temp5=merge(temp1,temp2,by="sampleID",all=T)
+# temp6=merge(temp3,temp4,by="sampleID",all=T)
+# temp7=merge(temp5,temp6,by="sampleID",all=T)
+# colnames(temp7)=c("sampleID","NT_READS","NT_COVERAGE","NT_POSITIONS","IS_READS","IS_COVERAGE","IS_POSITIONS")
+# write.table(temp7,file=paste0("Ratios_",flipped, format(Sys.time(), "%Y%m%d_%H%M%S"),".txt"),sep="\t", row.names=FALSE,quote = F)
+
+# library(beeswarm)
+# beeswarm(log10(ntCalls$PE),pwcol=1+as.numeric(ntCalls$PE<ntCalls$PC),main=paste0(flipped," XXXXX PET scores"),ylab="log PET")
+# 
+}
+
+#########################################################################################################################
+##Start of main program.
+#########################################################################################################################
+ratio=6 #fold IS over NT for 2 NT alt vs 0 IS alt
+
+if("--help" %in% args){
+message('snaqseq --vc=<string> --flatten=<T or F>  --flipped <string> --IStoNTFile=<path> --wd=<path>')
+message('vc variant caller used to create gVCF <vardict or ampliseq-hd>')
+message('flatten \'T\' if vcf contains multiple alts per row, else \'F\'')
+message('flipped analysis \'NT\', \'IS\', or \'both\' perform snaq-seq analysis on native or snaq control, or both sequences, respectively.')
+message('IStoNTfile path is a tab separated table <NT-chrom><NT-pos><NT-ref><IS-chrom><IS-pos><IS-ref>, lower case gatc indicates base change')
+message('wd is working directory, script processes all *vcf.gz, assumes from same directory.')
+stop()
+}
+
+#Process command line input or ask for input from console
+if("--vc=vardict" %in% args){
+  df="DP";vf="VD";fs="*vcf$"
+}else if ("--vc=ampliseq-hd" %in% args){
+  df="FDP";vf="FAO";fs="*vcf$"
+}else {
+    stop("No VCF information entered")
+}
+
+if("--flatten=T" %in% args){
+  flatten=T
+} else if ("--flatten=F" %in% args){
+  flatten=F
+} else {
+  stop("No flatten T or F entered")
+}
+
+if ("--flipped=NT" %in% args){
+  flippedAnalysis="NT"
+}else if ("--flipped=IS" %in% args) {
+  flippedAnalysis="IS"
+}else if ("--flipped=both" %in% args) {
+  flippedAnalysis="both"
+} else {
+  stop("incorrect flipped analysis input")
+}
+
+i <- args[grepl("--IStoNTFile",args)]
+j <- sub(" --.*","",sub(".*--IStoNTFile=","",i))
+if(length(j)!=0){
+  if (file_test("-f",j)){
+    #NT to IS lookup Table. ref2 is lowercase for base change positions
+    temp <- read.csv(j, stringsAsFactors = FALSE)
+    #headers: REFNAME	ORef	POS	overlap	basechange	cc	REF
+    temp <- unique(temp[! grepl("-SNAQ-CC",temp$ORef), c("ORef", "POS", "REF") ]) #file is NT & IS matched POS after CC removed
+    temp1 <- temp[! grepl("-SNAQ-IS",temp$ORef), ]
+    temp2 <- temp[grepl ("-SNAQ-IS",temp$ORef), ]
+    NTISPos <- cbind(temp1, temp2)
+    colnames(NTISPos)=c("CHROM","POS","REF","conIS","posIS","ref2")
+  } else {
+    stop(paste0("NT to IS lookup table file not found: ",j))
+  }
+}else{
+  stop("NT to IS lookup table entry required (IStoNTFile=<filepath>)")
+}
+
+i <- args[grepl("--wd",args)]
+j <- sub(" --.*","",sub(".*--wd=","",i))
+if(length(j)!=0 && file_test("-d",j)){
+  setwd(j)
+} else { 
+  stop(paste0("Working directory (wd=<dir>) not set: ",j))
+}
+snpOnly=TRUE
+
+#Filter NT calls with SNAQ
+#read all VCF data based on filter provided to ReadVCFPair.
+calls=ReadVCFPair(fs,df,vf,flatten)
+
+if(flippedAnalysis %in% c("NT","both")){
+  flipped="";ntRefs=unique(calls$CHROM[calls$CHROM %in% NTISPos$CHROM])  ####this is a hack to detect which ref names belong to control.  #####
+  SNAQ(ratio,ntRefs,calls,NTISPos,flipped,snpOnly)
+}
+if(flippedAnalysis %in% c("IS","both")){
+  flipped="flipped";ntRefs=unique(calls$CHROM[calls$CHROM %in% NTISPos$conIS])
+  temp=NTISPos[,c("conIS","posIS","ref2","CHROM","POS","REF")]
+  colnames(temp)=c("CHROM","POS","REF","conIS","posIS","ref2")
+  SNAQ(ratio,ntRefs,calls,temp,flipped,snpOnly)
+}
+
